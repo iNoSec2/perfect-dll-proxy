@@ -2,7 +2,6 @@ import pefile
 import argparse
 import os
 import sys
-
 """
 References:
 - https://nibblestew.blogspot.com/2019/05/
@@ -15,7 +14,6 @@ References:
 - https://github.com/Flangvik/SharpDllProxy
 - https://github.com/hfiref0x/WinObjEx64
 """
-
 def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description="Generate a proxy DLL")
@@ -29,53 +27,36 @@ def main():
     if output is None:
         file, _ = os.path.splitext(basename)
         output = f"{file}.cpp"
-
     # Use the system directory if the DLL is not found
     if not os.path.exists(dll) and not os.path.isabs(dll):
         dll = os.path.join(os.environ["SystemRoot"], "System32", dll)
     if not os.path.exists(dll):
         print(f"File not found: {dll}")
         sys.exit(1)
-
     # Enumerate the exports
     pe = pefile.PE(dll)
-    commands = []
+    exports = []
     for exp in pe.DIRECTORY_ENTRY_EXPORT.symbols:
         ordinal = exp.ordinal
         if exp.name is None:
-            command = f"__proxy{ordinal}=\" DLLPATH \".#{ordinal},@{ordinal},NONAME"
+            # Handle ordinal-only exports (these need special handling with the macro approach)
+            exports.append(f"__proxy{ordinal}")
         else:
             name = exp.name.decode()
-            command = f"{name}=\" DLLPATH \".{name}"
-            # The first underscore is removed by the linker
-            if name.startswith("_"):
-                command = f"_{command}"
-            # Special case for COM exports
-            if name in {
-                "DllCanUnloadNow",
-                "DllGetClassObject",
-                "DllInstall",
-                "DllRegisterServer",
-                "DllUnregisterServer",
-                }:
-                command += ",PRIVATE"
-            elif args.force_ordinals:
-                command += f",@{ordinal}"
-        commands.append(command)
-
+            exports.append(name)
     # Generate the proxy
     with open(output, "w") as f:
         f.write(f"""#include <Windows.h>
 
 #ifdef _WIN64
-#define DLLPATH "\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\System32\\\\{basename}"
+#define MAKE_EXPORT(func) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\System32\\\\{basename}." func
 #else
-#define DLLPATH "\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\SysWOW64\\\\{basename}"
+#define MAKE_EXPORT(func) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\SysWOW64\\\\{basename}." func
 #endif // _WIN64
 
 """)
-        for command in commands:
-            f.write(f"#pragma comment(linker, \"/EXPORT:{command}\")\n")
+        for export_name in exports:
+            f.write(f"#pragma comment(linker, MAKE_EXPORT(\"{export_name}\"))\n")
         f.write("""
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
@@ -93,7 +74,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     return TRUE;
 }
 """)
-
 
 if __name__ == "__main__":
     main()
