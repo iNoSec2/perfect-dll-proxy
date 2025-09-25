@@ -35,28 +35,72 @@ def main():
         sys.exit(1)
     # Enumerate the exports
     pe = pefile.PE(dll)
-    exports = []
+    regular_exports = []
+    com_exports = []
+    ordinal_exports = []
+    
     for exp in pe.DIRECTORY_ENTRY_EXPORT.symbols:
         ordinal = exp.ordinal
         if exp.name is None:
-            # Handle ordinal-only exports (these need special handling with the macro approach)
-            exports.append(f"__proxy{ordinal}")
+            # Handle ordinal-only exports
+            ordinal_exports.append((f"__proxy{ordinal}", ordinal))
         else:
             name = exp.name.decode()
-            exports.append(name)
+            # Check if this is a COM export that should be PRIVATE
+            if name in {
+                "DllCanUnloadNow",
+                "DllGetClassObject",
+                "DllInstall",
+                "DllRegisterServer",
+                "DllUnregisterServer",
+            }:
+                com_exports.append(name)
+            else:
+                regular_exports.append(name)
+
     # Generate the proxy
     with open(output, "w") as f:
-        f.write(f"""#include <Windows.h>
-
-#ifdef _WIN64
-#define MAKE_EXPORT(func) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\System32\\\\{basename}." func
-#else
-#define MAKE_EXPORT(func) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\SysWOW64\\\\{basename}." func
-#endif // _WIN64
-
-""")
-        for export_name in exports:
+        f.write(f"#include <Windows.h>\n\n")
+        
+        # Build the macro definitions in one chunk
+        macros = []
+        if regular_exports:
+            macros.append(f'#define MAKE_EXPORT(func) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\System32\\\\{basename}." func')
+        if com_exports:
+            macros.append(f'#define MAKE_EXPORT_PRIVATE(func) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\System32\\\\{basename}." func ",PRIVATE"')
+        if ordinal_exports:
+            macros.append(f'#define MAKE_EXPORT_ORDINAL(func, ord) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\System32\\\\{basename}.#" #ord ",@" #ord ",NONAME"')
+        
+        # 32-bit versions
+        macros_32 = []
+        if regular_exports:
+            macros_32.append(f'#define MAKE_EXPORT(func) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\SysWOW64\\\\{basename}." func')
+        if com_exports:
+            macros_32.append(f'#define MAKE_EXPORT_PRIVATE(func) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\SysWOW64\\\\{basename}." func ",PRIVATE"')
+        if ordinal_exports:
+            macros_32.append(f'#define MAKE_EXPORT_ORDINAL(func, ord) "/EXPORT:" func "=\\\\\\\\.\\\\GLOBALROOT\\\\SystemRoot\\\\SysWOW64\\\\{basename}.#" #ord ",@" #ord ",NONAME"')
+        
+        # Output macros only if we have any
+        if macros:
+            f.write("#ifdef _WIN64\n")
+            for macro in macros:
+                f.write(f"{macro}\n")
+            f.write("#else\n")
+            for macro in macros_32:
+                f.write(f"{macro}\n")
+            f.write("#endif // _WIN64\n\n")
+        
+        # Regular exports
+        for export_name in regular_exports:
             f.write(f"#pragma comment(linker, MAKE_EXPORT(\"{export_name}\"))\n")
+        
+        # COM exports (PRIVATE)
+        for export_name in com_exports:
+            f.write(f"#pragma comment(linker, MAKE_EXPORT_PRIVATE(\"{export_name}\"))\n")
+        
+        # Ordinal-only exports
+        for export_name, ordinal in ordinal_exports:
+            f.write(f"#pragma comment(linker, MAKE_EXPORT_ORDINAL(\"{export_name}\", {ordinal}))\n")
         f.write("""
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
